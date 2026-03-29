@@ -36,6 +36,7 @@ This repo now supports a real local first-pass pipeline:
 
 - script generation with a local scripted generator
 - voiceover generation using macOS `say`
+- cloud fallback that skips `say` when it is unavailable
 - MP3 conversion with `ffmpeg`
 - vertical MP4 rendering with burned-in text overlays
 
