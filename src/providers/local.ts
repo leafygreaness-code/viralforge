@@ -1,6 +1,9 @@
 import { execFile } from "node:child_process";
+import { access } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { promisify } from "node:util";
 import path from "node:path";
+import ffmpegStatic from "ffmpeg-static";
 import type {
   AssetProvider,
   LlmProvider,
@@ -12,8 +15,7 @@ import type { ProjectInput, RenderOutput, ScriptPackage, VoiceAsset } from "../d
 import { audioRoot, ensureMediaDirs, videoRoot } from "../lib/media.js";
 
 const execFileAsync = promisify(execFile);
-const ffmpegBin = "/opt/homebrew/bin/ffmpeg";
-const ffprobeBin = "/opt/homebrew/bin/ffprobe";
+const ffmpegBin = ffmpegStatic ?? "/opt/homebrew/bin/ffmpeg";
 const sayBin = "/usr/bin/say";
 
 export class LocalLlmProvider implements LlmProvider {
@@ -52,30 +54,51 @@ export class LocalTtsProvider implements TtsProvider {
   async synthesize(script: ScriptPackage): Promise<VoiceAsset> {
     await ensureMediaDirs();
     const assetId = `voice_${Date.now()}`;
-    const aiffPath = path.join(audioRoot, `${assetId}.aiff`);
+    const audioPath = path.join(audioRoot, `${assetId}.m4a`);
+    const estimatedSeconds = estimateSpeechDurationSeconds(script.script);
 
-    await execFileAsync(sayBin, [
-      "-v",
-      "Samantha",
-      "-o",
-      aiffPath,
-      script.script
-    ]);
+    if (await canUseLocalSay()) {
+      const aiffPath = path.join(audioRoot, `${assetId}.aiff`);
 
-    const { stdout } = await execFileAsync(ffprobeBin, [
-      "-v",
-      "error",
-      "-show_entries",
-      "format=duration",
-      "-of",
-      "default=noprint_wrappers=1:nokey=1",
-      aiffPath
-    ]);
+      await execFileAsync(sayBin, [
+        "-v",
+        "Samantha",
+        "-o",
+        aiffPath,
+        script.script
+      ]);
+
+      await execFileAsync(ffmpegBin, [
+        "-y",
+        "-i",
+        aiffPath,
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        audioPath
+      ]);
+    } else {
+      await execFileAsync(ffmpegBin, [
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        `anullsrc=channel_layout=stereo:sample_rate=44100`,
+        "-t",
+        String(estimatedSeconds),
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        audioPath
+      ]);
+    }
 
     return {
       assetId,
-      url: `/generated/audio/${assetId}.aiff`,
-      durationMs: normalizeDurationMs(stdout, 12000)
+      url: `/generated/audio/${assetId}.m4a`,
+      durationMs: estimatedSeconds * 1000
     };
   }
 }
@@ -124,20 +147,10 @@ export class LocalRenderProvider implements RenderProvider {
       outputPath
     ]);
 
-    const { stdout } = await execFileAsync(ffprobeBin, [
-      "-v",
-      "error",
-      "-show_entries",
-      "format=duration",
-      "-of",
-      "default=noprint_wrappers=1:nokey=1",
-      outputPath
-    ]);
-
     return {
       assetId,
       url: `/generated/video/${assetId}.mp4`,
-      durationMs: normalizeDurationMs(stdout, duration * 1000)
+      durationMs: duration * 1000
     };
   }
 }
@@ -158,4 +171,18 @@ export class LocalStorageProvider implements StorageProvider {
 function normalizeDurationMs(raw: string, fallbackMs: number) {
   const parsed = Math.round(Number(raw.trim()) * 1000);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackMs;
+}
+
+async function canUseLocalSay() {
+  try {
+    await access(sayBin, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function estimateSpeechDurationSeconds(text: string) {
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+  return Math.max(8, Math.ceil(words / 2.5));
 }
